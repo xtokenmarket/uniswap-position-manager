@@ -1,12 +1,14 @@
-const { expect } = require('chai');
-const { ethers } = require('hardhat');
-const { deploymentFixture } = require('./fixture');
+import { expect } from 'chai';
+import { ethers } from 'hardhat';
+import { deploymentFixture } from './fixture';
 
 // Events tests for UniswapPositionManager
 describe('Contract: UniswapPositionManager', async () => {
+    let positionManager, nftId, nftManager, token0, token1;
+    let admin, user1
   beforeEach(async () => {
       ({ positionManager, nftId, nftManager, token0, token1 } = await deploymentFixture());
-      [admin, user1, ...addrs] = await ethers.getSigners();
+      [admin, user1] = await ethers.getSigners();
   })
 
   describe('Reposition', async () => {

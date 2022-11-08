@@ -1,7 +1,6 @@
-const { ethers, network } = require("hardhat");
-const { getUniswapInstances } = require("./uniswapHelpers");
-const { BigNumber } = require("ethers");
-const { default: axios } = require("axios");
+import { ethers, network } from "hardhat";
+import { getUniswapInstances } from "./uniswapHelpers";
+import axios from "axios";
 
 
 /**
@@ -134,8 +133,8 @@ function linkBytecodeToLibraries(bytecode, linkReferences, libraries) {
  */
 async function depositLiquidityInPool(positionManager, amount0, amount1, token0, token1, fee, receiverAddress) {
     let approveAmount = bnDecimal(1000000000);
-    tx = await token0.approve(positionManager.address, approveAmount);
-    tx = await token1.approve(positionManager.address, approveAmount);
+    await token0.approve(positionManager.address, approveAmount);
+    await token1.approve(positionManager.address, approveAmount);
 
     // widest possible range
     let lowTick = -887220;
@@ -903,7 +902,7 @@ function gnn8d(amount) {
     return amount.div(decimals).toNumber();
 }
 
-module.exports = {
+export {
     deploy, deployArgs, deployWithAbi, deployAndLink, deployWithAbiAndLink, getTWAP,
     getRatio, getTokenPrices, getMinPrice, getMaxPrice, getMinTick, getMaxTick,
     getTokenBalance, getPositionBalance, getBufferBalance, printPositionAndBufferBalance,
@@ -915,8 +914,7 @@ module.exports = {
     getTWAPDecimals, getSwapAmountWhenMinting, getMidPrice, printMidPrice,
     getPositionTokenRatio, printPositionTokenRatios, getPriceBounds,
     stakeBuffer, getBalance, setAutomine, getLastBlock, 
-    getLastBlockTimestamp, decreaseTime,
-    getMinTick, getMaxTick, getEvent,
+    getLastBlockTimestamp, decreaseTime, getEvent,
     // mainnet fork functions
     impersonate, swapToken0ForToken1Mainnet, swapToken1ForToken0Mainnet,
     receiveXTK, receiveWeth, swapAndStake,

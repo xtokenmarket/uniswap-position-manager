@@ -1,30 +1,29 @@
-const { ethers, deployments } = require('hardhat');
-const { deploy, deployArgs, deployAndLink, deployWithAbi,
+import { ethers, deployments } from 'hardhat';
+import { deploy, deployArgs, deployAndLink, deployWithAbi,
         bnDecimal, 
         depositLiquidityInPool,
         deployWithAbiAndLink,
-        getEvent} = require('../scripts/helpers');
+        getEvent} from '../scripts/helpers';
 
-const SwapRouter = require('@uniswap/v3-periphery/artifacts/contracts/SwapRouter.sol/SwapRouter.json')
-const UniQuoter = require('@uniswap/v3-periphery/artifacts/contracts/lens/Quoter.sol/Quoter.json')
-const NFTPositionDescriptor =
- require('@uniswap/v3-periphery/artifacts/contracts/NonFungibleTokenPositionDescriptor.sol/NonFungibleTokenPositionDescriptor.json');
-const NFTDescriptorLibrary =
-  require('@uniswap/v3-periphery/artifacts/contracts/libraries/NFTDescriptor.sol/NFTDescriptor.json');
-const NFTPositionManager = 
-require('@uniswap/v3-periphery/artifacts/contracts/NonfungiblePositionManager.sol/NonfungiblePositionManager.json');
+import UniQuoter from '@uniswap/v3-periphery/artifacts/contracts/lens/Quoter.sol/Quoter.json';
 
-const UniFactory = require('@uniswap/v3-core/artifacts/contracts/UniswapV3Factory.sol/UniswapV3Factory.json');
+import SwapRouter from '@uniswap/v3-periphery/artifacts/contracts/SwapRouter.sol/SwapRouter.json'
+import NFTDescriptorLibrary from '@uniswap/v3-periphery/artifacts/contracts/libraries/NFTDescriptor.sol/NFTDescriptor.json';
+import NFTPositionDescriptor from '@uniswap/v3-periphery/artifacts/contracts/NonFungibleTokenPositionDescriptor.sol/NonFungibleTokenPositionDescriptor.json';
+import NFTPositionManager from '@uniswap/v3-periphery/artifacts/contracts/NonfungiblePositionManager.sol/NonfungiblePositionManager.json';
+import UniFactory from '@uniswap/v3-core/artifacts/contracts/UniswapV3Factory.sol/UniswapV3Factory.json';
+
+import { ERC20Basic, INonfungiblePositionManager, UniswapPositionManager } from '../typechain';
 
 /**
  * Deployment fixture
  * Deploys minimum required for tests
  */
-const deploymentFixture = deployments.createFixture(async () => {
+export const deploymentFixture = deployments.createFixture(async () => {
     const [admin, user1, user2, user3] = await ethers.getSigners();
     // Deploy tokens for initial pool deployment
-    let token0 = await deployArgs('ERC20Basic', 'DAI', 'DAI');
-    let token1 = await deployArgs('ERC20Basic', 'TUSD', 'TUSD');
+    let token0 : ERC20Basic = <ERC20Basic>await deployArgs('ERC20Basic', 'DAI', 'DAI');
+    let token1 : ERC20Basic = <ERC20Basic>await deployArgs('ERC20Basic', 'TUSD', 'TUSD');
     // Tokens must be sorted by address
     if(token0.address.toLowerCase() > token1.address.toLowerCase()) {
       let tmp = token0;
@@ -37,7 +36,7 @@ const deploymentFixture = deployments.createFixture(async () => {
     const tokenDescriptorLib = await deployWithAbi(NFTDescriptorLibrary, admin);
     const tokenDescriptor = await deployWithAbiAndLink(NFTPositionDescriptor, 
       'NFTDescriptor', tokenDescriptorLib.address, admin, token0.address, "0x46554e4e594d4f4e455900000000000000000000000000000000000000000000");
-    const nftManager = await deployWithAbi(NFTPositionManager, admin, 
+    const nftManager: INonfungiblePositionManager = <INonfungiblePositionManager>await deployWithAbi(NFTPositionManager, admin, 
                                                 uniFactory.address, token0.address, tokenDescriptor.address);
     const swapRouter = await deployWithAbi(SwapRouter, admin, uniFactory.address, token0.address);
     const quoter = await deployWithAbi(UniQuoter, admin, uniFactory.address, token0.address);
@@ -58,7 +57,7 @@ const deploymentFixture = deployments.createFixture(async () => {
     let nftId = depositEvent.args[0];
 
     // Deploy position manager
-    const positionManager = await deployArgs('UniswapPositionManager', 
+    const positionManager: UniswapPositionManager = <UniswapPositionManager>await deployArgs('UniswapPositionManager', 
       nftManager.address, uniFactory.address);
     
     // transfer tokens to other users
@@ -71,5 +70,3 @@ const deploymentFixture = deployments.createFixture(async () => {
       token0, token1, positionManager, nftId, nftManager
     }
 });
-
-module.exports = { deploymentFixture };
