@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 pragma solidity 0.7.6;
 pragma abicoder v2;
 
@@ -29,15 +30,19 @@ contract UniswapPositionManager {
     address private constant oneInchExchange =
         0x1111111254fb6c44bAC0beD2854e76F90643097d;
 
-    constructor(INonfungiblePositionManager _nftManager, IUniswapV3Factory _uniswapFactory) {
+    constructor(
+        INonfungiblePositionManager _nftManager,
+        IUniswapV3Factory _uniswapFactory
+    ) {
         nftManager = _nftManager;
         uniswapFactory = _uniswapFactory;
     }
 
     /* ========================================================================================= */
-    /*                                          Events                                           */
+    /*                                          Structs                                          */
     /* ========================================================================================= */
 
+    // Parameters for reposition function input
     struct RepositionParams {
         uint256 positionId;
         int24 newTickLower;
@@ -47,6 +52,7 @@ contract UniswapPositionManager {
         bytes oneInchData;
     }
 
+    // Main position parameters
     struct PositionParams {
         address token0;
         address token1;
@@ -54,6 +60,10 @@ contract UniswapPositionManager {
         int24 tickLower;
         int24 tickUpper;
     }
+
+    /* ========================================================================================= */
+    /*                                          Events                                           */
+    /* ========================================================================================= */
 
     event Repositioned(
         uint256 indexed oldPositionId,
@@ -65,7 +75,7 @@ contract UniswapPositionManager {
     );
 
     /* ========================================================================================= */
-    /*                                            User-facing                                    */
+    /*                                        User-facing                                        */
     /* ========================================================================================= */
 
     /**
@@ -98,8 +108,8 @@ contract UniswapPositionManager {
         );
 
         // approve the tokens to the uni nft manager
-        IERC20(positionParams.token0).approve(address(nftManager), amount0);
-        IERC20(positionParams.token1).approve(address(nftManager), amount1);
+        IERC20(positionParams.token0).approve(address(nftManager), _amount0);
+        IERC20(positionParams.token1).approve(address(nftManager), _amount1);
 
         // mint the position NFT and deposit the liquidity
         // user receives the new nft
@@ -112,7 +122,7 @@ contract UniswapPositionManager {
             params.newTickLower,
             params.newTickUpper
         );
-        
+
         // swap using 1inch and stake all tokens in position after swap
         if (params.oneInchData.length != 0) {
             approveOneInch(positionParams.token0, positionParams.token1);
@@ -126,6 +136,15 @@ contract UniswapPositionManager {
                 getPriceFromTick(params.newTickUpper)
             );
         }
+        // Return balance not sent to user
+        IERC20(positionParams.token0).transfer(
+            msg.sender,
+            IERC20(positionParams.token0).balanceOf(address(this))
+        );
+        IERC20(positionParams.token1).transfer(
+            msg.sender,
+            IERC20(positionParams.token1).balanceOf(address(this))
+        );
 
         {
             // Check if balances are enough
@@ -174,7 +193,7 @@ contract UniswapPositionManager {
     function unstakePosition(
         uint128 liquidity,
         uint256 positionId
-    ) public returns (uint256 amount0, uint256 amount1) {
+    ) private returns (uint256 amount0, uint256 amount1) {
         (uint256 _amount0, uint256 _amount1) = getAmountsForLiquidity(
             liquidity,
             positionId
@@ -200,21 +219,31 @@ contract UniswapPositionManager {
         uint160 poolPrice,
         uint160 priceLower,
         uint160 priceUpper
-    ) public returns (uint256 stakedAmount0, uint256 stakedAmount1) {
+    ) private returns (uint256 stakedAmount0, uint256 stakedAmount1) {
         (
             uint256 stakeAmount0,
             uint256 stakeAmount1
-        ) = calculatePoolMintedAmounts(amount0, amount1, poolPrice, priceLower, priceUpper);
-        (, stakedAmount0, stakedAmount1) = nftManager.increaseLiquidity(
-                INonfungiblePositionManager.IncreaseLiquidityParams({
-                    tokenId: tokenId,
-                    amount0Desired: stakeAmount0,
-                    amount1Desired: amount1,
-                    amount0Min: stakeAmount0.sub(stakeAmount0.div(MINT_BURN_SLIPPAGE)),
-                    amount1Min: stakeAmount1.sub(stakeAmount1.div(MINT_BURN_SLIPPAGE)),
-                    deadline: block.timestamp
-                })
+        ) = calculatePoolMintedAmounts(
+                amount0,
+                amount1,
+                poolPrice,
+                priceLower,
+                priceUpper
             );
+        (, stakedAmount0, stakedAmount1) = nftManager.increaseLiquidity(
+            INonfungiblePositionManager.IncreaseLiquidityParams({
+                tokenId: tokenId,
+                amount0Desired: stakeAmount0,
+                amount1Desired: amount1,
+                amount0Min: stakeAmount0.sub(
+                    stakeAmount0.div(MINT_BURN_SLIPPAGE)
+                ),
+                amount1Min: stakeAmount1.sub(
+                    stakeAmount1.div(MINT_BURN_SLIPPAGE)
+                ),
+                deadline: block.timestamp
+            })
+        );
     }
 
     /**
@@ -237,7 +266,7 @@ contract UniswapPositionManager {
         uint128 amount0,
         uint128 amount1,
         uint256 positionId
-    ) public returns (uint256 collected0, uint256 collected1) {
+    ) private returns (uint256 collected0, uint256 collected1) {
         (collected0, collected1) = nftManager.collect(
             INonfungiblePositionManager.CollectParams({
                 tokenId: positionId,
@@ -252,7 +281,7 @@ contract UniswapPositionManager {
      * @dev burn NFT representing a pool position with tokenId
      * @dev uses NFT Position Manager
      */
-    function burn(uint256 tokenId) public {
+    function burn(uint256 tokenId) private {
         nftManager.burn(tokenId);
     }
 
@@ -268,7 +297,7 @@ contract UniswapPositionManager {
         uint24 poolFee,
         int24 newTickLower,
         int24 newTickUpper
-    ) public returns (uint256 _tokenId) {
+    ) private returns (uint256 _tokenId) {
         (_tokenId, , , ) = nftManager.mint(
             INonfungiblePositionManager.MintParams({
                 token0: token0,
@@ -294,7 +323,7 @@ contract UniswapPositionManager {
      * @dev Swap tokens in CLR (mining pool) using 1inch v4 exchange
      * @param _oneInchData - One inch calldata, generated off-chain from their v4 api for the swap
      */
-    function oneInchSwap(bytes memory _oneInchData) public {
+    function oneInchSwap(bytes memory _oneInchData) private {
         (bool success, ) = oneInchExchange.call(_oneInchData);
 
         require(success, "One inch swap call failed");
@@ -303,7 +332,7 @@ contract UniswapPositionManager {
     /**
      * Approve 1inch v4 for swaps
      */
-    function approveOneInch(address token0, address token1) public {
+    function approveOneInch(address token0, address token1) private {
         IERC20(token0).safeApprove(oneInchExchange, type(uint256).max);
         IERC20(token1).safeApprove(oneInchExchange, type(uint256).max);
     }
@@ -599,7 +628,7 @@ contract UniswapPositionManager {
     }
 
     /**
-     * @dev Returns a position's token 0 and token 1 addresses
+     * @dev Returns the parameters needed for reposition function
      * @param positionId the nft id of the position
      */
     function getPositionParams(
