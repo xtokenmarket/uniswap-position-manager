@@ -48,8 +48,8 @@ const config: HardhatUserConfig = {
     hardhat: {
       forking: {
         url: alchemy.mainnet + alchemyKey,
-        enabled: false,
-        blockNumber: 15924432
+        enabled: true,
+        blockNumber: 15974600
       }
     },
     // mainnet: {

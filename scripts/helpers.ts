@@ -1,6 +1,13 @@
+import hre from "hardhat";
 import { ethers, network } from "hardhat";
 import { getUniswapInstances } from "./uniswapHelpers";
 import axios from "axios";
+import { priceToClosestTick, nearestUsableTick, encodeSqrtRatioX96, FeeAmount, TICK_SPACINGS } from '@uniswap/v3-sdk/dist/'
+import { tickToPrice } from '@uniswap/v3-sdk'
+import { ChainId, Price, Currency, CurrencyAmount, Token, TokenAmount } from '@uniswap/sdk-core'
+import { parseUnits } from '@ethersproject/units'
+import JSBI from 'jsbi';
+import { ERC20, IERC20, UniswapPositionManager } from "../typechain";
 
 
 /**
@@ -122,30 +129,30 @@ function linkBytecodeToLibraries(bytecode, linkReferences, libraries) {
   }
 
 /**
- * Deposit external liquidity in a given pool
+ * Deposit liquidity in a given pool
  * @param {Contract} positionManager uni v3 position manager contract
  * @param {String} amount0 amount0 to deposit
  * @param {String} amount1 amount1 to deposit
  * @param {String} token0 token0 to deposit
  * @param {String} token1 token1 to deposit
  * @param {String} fee pool fee
+ * @param {String} lowerTick position lower tick
+ * @param {String} upperTick position upper tick
  * @param {String} receiverAddress address to receive the position nft
+ * @returns {BigNumber} nftId the id of the position nft 
  */
-async function depositLiquidityInPool(positionManager, amount0, amount1, token0, token1, fee, receiverAddress) {
+async function depositLiquidityInPool(positionManager, amount0, amount1, token0, token1, fee, lowerTick, upperTick, receiverAddress) {
     let approveAmount = bnDecimal(1000000000);
     await token0.approve(positionManager.address, approveAmount);
     await token1.approve(positionManager.address, approveAmount);
 
-    // widest possible range
-    let lowTick = -887220;
-    let highTick = 887220;
     const pendingBlock = await network.provider.send("eth_getBlockByNumber", ["pending", false])
-    return await positionManager.mint({
+    let tx = await positionManager.mint({
         token0: token0.address,
         token1: token1.address,
         fee: fee,
-        tickLower: lowTick,
-        tickUpper: highTick,
+        tickLower: lowerTick,
+        tickUpper: upperTick,
         amount0Desired: amount0,
         amount1Desired: amount1,
         amount0Min: 0,
@@ -153,70 +160,224 @@ async function depositLiquidityInPool(positionManager, amount0, amount1, token0,
         recipient: receiverAddress,
         deadline: pendingBlock.timestamp
     })
+    let depositEvent = await getEvent(tx, 'IncreaseLiquidity');
+    let nftId = depositEvent.args[0];
+    let amount0Deposited = depositEvent.args[0].amount0;
+    let amount1Deposited = depositEvent.args[0].amount1;
+    return {
+        nftId: nftId,
+        amount0: amount0Deposited,
+        amount1: amount1Deposited
+    }
 }
 
 /**
- * Calculate amount to swap when rebalancing
- * @param {Contract} CLR CLR instance
- * @param {Contract} uniswapLibrary Uniswap Library instance
+ * Calculate amount to swap when repositioning
+ * @param {Contract} LPManager UniswapPositionManager instance
+ * @param {String} positionId nft id of the position
  * @param {BigNumber} amount0 token 0 amount for staking
  * @param {BigNumber} amount1 token 1 amount for staking
+ * @param {BigNumber} token0Decimals token 0 decimals
+ * @param {BigNumber} token1Decimals token 1 decimals
+ * @param {BigNumber} newTickLower lower tick of the new position
+ * @param {BigNumber} newTickUpper upper tick of the new position
+ * @param {bool} considerPoolLiquidity if true, consider price swap impact on uni v3 pool
  * @returns [BigNumber, bool] swapAmount and swap 0 -> 1 if true, 1 -> 0 if false
  */
-async function getSwapAmountWhenMinting(CLR, uniswapLibrary, amount0, amount1) {
-    let minted = await getMintedAmounts(CLR, amount0, amount1);
-    let poolAddress = (await CLR.uniContracts()).pool;
-    let liquidity = await CLR.getLiquidityForAmounts(minted[0], minted[1]);
-    let poolLiquidity = await uniswapLibrary.getPoolLiquidity(poolAddress);
-    let liquidityRatio = liquidity.mul(bn(10).pow(18)).div(poolLiquidity);
-    let midPrice = (await uniswapLibrary.getPoolPriceWithDecimals(poolAddress));
+ async function getRepositionSwapAmount(LPManager: UniswapPositionManager, positionId, amount0, amount1, 
+        token0Decimals, token1Decimals, newTickLower, newTickUpper, considerPoolLiquidity) {
+    let poolPrice = await LPManager.getPoolPrice(positionId);
+    let priceLower = await LPManager.getPriceFromTick(newTickLower);
+    let priceUpper = await LPManager.getPriceFromTick(newTickUpper);
+    let minted = await getMintedAmounts(LPManager, amount0, amount1, poolPrice, priceLower, priceUpper);
+    let midPrice = await LPManager.getPoolPriceWithDecimals(positionId, token0Decimals, token1Decimals);
+
+    let mintLiquidity = await LPManager["getLiquidityForAmounts(uint256,uint256,uint256)"](minted[0], minted[1], positionId);
+    let poolLiquidity = await LPManager.getPoolLiquidity(positionId);
+    let liquidityRatio = mintLiquidity.mul(bn(10).pow(18)).div(poolLiquidity);
 
     // n - swap amt, x - amount 0 to mint, y - amount 1 to mint,
     // z - amount 0 minted, t - amount 1 minted, p0 - pool mid price
     // l - liquidity ratio (current mint liquidity vs total pool liq)
     // (X - n) / (Y + n * p0) = (Z + l * n) / (T - l * n * p0) ->
     // n = (X * T - Y * Z) / (p0 * l * X + p0 * Z + l * Y + T)
-    let numerator = amount0.mul(minted[1]).sub(amount1.mul(minted[0]));
-    let denominator = amount0.mul(liquidityRatio).mul(midPrice).div(bn(10).pow(18)).div(1e12).
+    
+    let denominator;
+    if(considerPoolLiquidity) {
+        // with liquidity ratio
+        denominator = amount0.mul(liquidityRatio).mul(midPrice).div(bn(10).pow(18)).div(1e12).
                         add(midPrice.mul(minted[0]).div(1e12)).
                         add(liquidityRatio.mul(amount1).div(bn(10).pow(18))).
                         add(minted[1]);
-    let result = numerator.div(denominator);
-    if(numerator.gt(0)) {
-        return [result, true];
     } else {
-        return [result, false];
+        // without liquidity ratio
+        denominator = (amount0.mul(midPrice).div(1e12)).
+                            add(midPrice.mul(minted[0]).div(1e12)).
+                            add(amount1).
+                            add(minted[1]);
     }
+
+    let a = amount0.mul(minted[1]).div(denominator);
+    let b = amount1.mul(minted[0]).div(denominator);
+    let swapAmount = a.gte(b) ? a.sub(b) : (b.sub(a)).mul(midPrice).div(1e12);
+    let swapSign = a.gte(b) ? true : false;
+
+    return [swapAmount, swapSign];
+}
+
+/**
+ * Get one inch calldata for swap
+ * @param lpSwapperAddress address of the lp swapper
+ * @param network network name
+ * @param swapAmount amount to be swapped
+ * @param t0Address token0 details
+ * @param t1Address token1 details
+ * @param _0for1 swap t0 for t1 or t1 for t0
+ */
+ async function getOneInchCalldata(lpSwapperAddress, network: String, swapAmount: String, t0Address: string, t1Address: string, _0for1: boolean) {
+    await setBalance(lpSwapperAddress);
+    let networkId = getNetworkId(network);
+    let oneInchData;
+    if(_0for1) {
+        let apiUrl = `https://api.1inch.exchange/v4.0/${networkId}/swap?fromTokenAddress=${t0Address}&toTokenAddress=${t1Address}&amount=${swapAmount}&fromAddress=${lpSwapperAddress}&slippage=50&disableEstimate=true`;
+        let response = await axios.get(apiUrl);
+        oneInchData = response.data.tx.data;
+    } else {
+        let apiUrl = `https://api.1inch.exchange/v4.0/${networkId}/swap?fromTokenAddress=${t1Address}&toTokenAddress=${t0Address}&amount=${swapAmount}&fromAddress=${lpSwapperAddress}&slippage=50&disableEstimate=true`;
+        let response = await axios.get(apiUrl);
+        oneInchData = response.data.tx.data;
+    }
+    return oneInchData;
 }
 
 
 /**
- * Function which replicates rebalance function
- * Stakes all available buffer balance in position
- * Can choose whether to use 1inch or Uni V3 only
- * @param {Contract} CLR 
- * @param {Contract} uniswapLibrary  
- * @param {Contract} token0 
- * @param {Contract} token1 
- * @param {Boolean} oneInch route through 1inch if true, Uni V3 if not 
+ * Get a network's id by name
+ * @param network 
+ * @returns 
  */
-async function swapAndStake(CLR, uniswapLibrary, token0, token1, oneInch) {
-    let buffer = await getBufferBalance(CLR);
-    let [swapAmt, side] = await getSwapAmountWhenMinting(CLR, uniswapLibrary, buffer[0], buffer[1]);
-    if(side) {
-        console.log('swappping', gnnd(swapAmt).toString(), 'of token 0 for token 1');
-    } else {
-        console.log('swappping', gnnd(swapAmt).toString(), 'of token 1 for token 0');
+ function getNetworkId(network) {
+    let networkToId = {
+        'mainnet': 1,
+        'optimism': 10,
+        'polygon': 137,
+        'arbitrum': 42161
     }
-    if(oneInch) {
-        await oneInchSwapCLR(CLR, swapAmt, token0, token1, side);
-    } else {
-        await CLR.adminSwap(swapAmt, side);
-    }
+    return networkToId[network];
+}
 
-    buffer = await getBufferBalance(CLR);
-    let minted = await getMintedAmounts(CLR, buffer[0], buffer[1]);
-    await CLR.adminStake(minted[0], minted[1]);
+// try to parse a user entered amount for a given token
+function tryParseAmount(value?: string, currency?: Currency): CurrencyAmount | undefined {
+    if (!value || !currency) {
+      return undefined
+    }
+    try {
+      const typedValueParsed = parseUnits(value, currency.decimals).toString()
+      if (typedValueParsed !== '0') {
+        return currency instanceof Token
+          ? new TokenAmount(currency, JSBI.BigInt(Number(typedValueParsed)))
+          : CurrencyAmount.ether(JSBI.BigInt(typedValueParsed))
+      }
+    } catch (error) {
+      // should fail if the user specifies too many decimal places of precision (or maybe exceed max uint?)
+      console.debug(`Failed to parse input amount: "${value}"`, error)
+    }
+    // necessary for all paths to return a value
+    return undefined
+}
+
+function tryParseTick(
+  baseToken?: Token,
+  quoteToken?: Token,
+  feeAmount?: FeeAmount,
+  value?: string
+): number | undefined {
+  if (!baseToken || !quoteToken || !feeAmount || !value) {
+    return undefined
+  }
+
+  const amount = tryParseAmount(value, quoteToken)
+
+  const amountOne = tryParseAmount('1', baseToken)
+
+  if (!amount || !amountOne) return undefined
+
+  // parse the typed value into a price
+  const price = new Price(baseToken, quoteToken, amountOne.raw, amount.raw)
+
+  // this function is agnostic to the base, will always return the correct tick
+  const tick = priceToClosestTick(price)
+
+  return nearestUsableTick(tick, TICK_SPACINGS[feeAmount])
+}
+
+/**
+ * Get pool ticks and prices from price bounds
+ * Ticks and prices depend on the tick spacing
+ * @param lowerPrice lower price bound
+ * @param upperPrice upper price bound
+ * @param t0Address token 0 address
+ * @param t1Address token 1 address
+ * @param t0Decimals token 0 decimals
+ * @param t1Decimals token 1 decimals
+ * @param feeAmount pool fee amount
+ */
+function getTicksFromPrices(lowerPrice: string, upperPrice: string, t0Address, t1Address, t0Decimals, t1Decimals, feeAmount) {
+    let chainId = ChainId.MAINNET;
+    let token0 = new Token(chainId, t0Address, t0Decimals, 'RND', 'RND');
+    let token1 = new Token(chainId, t1Address, t1Decimals, 'RND', 'RND');
+
+    let tickLower = tryParseTick(token0, token1, feeAmount, lowerPrice);
+    let tickUpper = tryParseTick(token0, token1, feeAmount, upperPrice);
+
+    let priceLower = tickToPrice(token0, token1, tickLower);
+    let priceUpper = tickToPrice(token0, token1, tickUpper);
+
+    return {
+      priceLower: priceLower.toFixed(4),
+      priceUpper: priceUpper.toFixed(4),
+      tickLower: tickLower,
+      tickUpper: tickUpper
+    }
+}
+
+/**
+ * Get price range from lower and upper ticks
+ * @param tickLower lower tick
+ * @param tickUpper upper tick
+ * @param _token0 token 0 details object
+ * @param _token1 token 1 details object
+ */
+function getPriceFromTicks(tickLower: number, tickUpper: number, _token0, _token1) {
+  let chainId = ChainId.MAINNET;
+  let token0 = new Token(chainId, _token0.address, _token0.decimals, _token0.symbol, _token0.name);
+  let token1 = new Token(chainId, _token1.address, _token1.decimals, _token1.symbol, _token1.name);
+
+  let priceLower = tickToPrice(token0, token1, tickLower);
+  let priceUpper = tickToPrice(token0, token1, tickUpper);
+
+  return {
+    priceLower: priceLower,
+    priceUpper: priceUpper
+  }
+}
+
+/**
+ * Conver a price from number format to Uniswap V3 format (X96) 
+ * @param price 
+ * @param token0Decimals 
+ * @param token1Decimals 
+ */
+function getPriceInX96(price, token0Decimals, token1Decimals) {
+  let chainId = ChainId.MAINNET;
+  let token0 = new Token(chainId, '0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9', token0Decimals, 'AAVE', 'AAVE');
+  let token1 = new Token(chainId, '0x80dc468671316e50d4e9023d3db38d3105c1c146', token1Decimals, 'xAAVEa', 'xAAVEa');
+  let feeAmount = FeeAmount.MEDIUM;
+
+  let tick = tryParseTick(token0, token1, feeAmount, price);
+  let _price = tickToPrice(token0, token1, tick);
+  let priceInX96 = encodeSqrtRatioX96(_price.raw.numerator, _price.raw.denominator);
+  console.log('price', price, ':', priceInX96.toString());
 }
 
 /**
@@ -297,7 +458,7 @@ async function receiveXTK(receiverAccount) {
     const signer = await impersonate(anotherAccountWithXTK);
     const xxtkaAmount = bnDecimal(50000000);
     await staking.connect(signer).unstake(xxtkaAmount);
-    const token = await ethers.getContractAt('BasicERC20', xtkAddress);
+    const token = await ethers.getContractAt('IERC20', xtkAddress);
     let newAccountBalance = await token.balanceOf(anotherAccountWithXTK);
 
     // 6M xtoken
@@ -308,6 +469,43 @@ async function receiveWeth(receiverAccount) {
     let wethAddress = '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2'
     let accountWithWeth = '0xe78388b4ce79068e89bf8aa7f218ef6b9ab0e9d0'
     await receiveToken(receiverAccount, accountWithWeth, wethAddress, bnDecimal(50000));
+}
+
+/**
+ * Receive 1M USDT from OKEx official exchange address
+ * To be used on mainnet forks
+ * @param receiverAccount 
+ */
+async function receiveUSDT(receiverAccount) {
+    let usdtAddress = '0xdAC17F958D2ee523a2206206994597C13D831ec7'
+    let accountWithUSDT = '0x5041ed759Dd4aFc3a72b8192C143F72f4724081A'
+    await receiveToken(receiverAccount, accountWithUSDT, usdtAddress, bnDecimals(1000000, 6));
+}
+
+/**
+ * Receive 1M USDC from Circle address
+ * To be used on mainnet forks
+ * @param receiverAccount 
+ */
+async function receiveUSDC(receiverAccount) {
+    let usdcAddress = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'
+    let accountWithUSDC = '0x55fe002aeff02f77364de339a1292923a15844b8'
+    await receiveToken(receiverAccount, accountWithUSDC, usdcAddress, bnDecimals(1000000, 6));
+}
+
+/**
+ * Get mainnet tokens as ERC20 contracts
+ * @returns 
+ */
+async function getTokens() {
+    let usdtAddress = '0xdAC17F958D2ee523a2206206994597C13D831ec7'
+    let usdcAddress = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'
+    let usdt: ERC20 = <ERC20>await ethers.getContractAt('ERC20', usdtAddress)
+    let usdc: ERC20 = <ERC20>await ethers.getContractAt('ERC20', usdcAddress)
+    return {
+        usdt: usdt,
+        usdc: usdc
+    }
 }
 
 /**
@@ -330,7 +528,7 @@ async function receiveToken(receiverAccount, accountToImpersonate, tokenAddress,
         value: bnDecimal(6)
     }
     await receiverAccount.sendTransaction(ethSendTx);
-    const token = await ethers.getContractAt('BasicERC20', tokenAddress);
+    const token = await ethers.getContractAt('IERC20', tokenAddress);
     await token.connect(signer).transfer(receiverAccount.address, amount);
 }
 
@@ -355,7 +553,7 @@ async function receiveTokens(receiverAccount, accountToImpersonate, tokens) {
     // console.log('sending eth to account:', accountToImpersonate)
     await receiverAccount.sendTransaction(ethSendTx);
     for(let [address, amount] of Object.entries(tokens)) {
-        const token = await ethers.getContractAt('BasicERC20', address);
+        const token = await ethers.getContractAt('IERC20', address);
         await token.connect(signer).transfer(receiverAccount.address, amount)
     }
 }
@@ -448,28 +646,16 @@ async function printMidPrice(uniswapLibrary, poolAddress) {
     console.log('MID PRICE:', (midPrice.toNumber() / 1e12).toFixed(8));
 }
 
-/**
- * Stake buffer token amounts from CLR
- * @param {Contract} CLR 
- * @param {BigNumber} amount0 
- * @param {BigNumber} amount1 
- */
- async function stakeBuffer(CLR) {
-    let buffer = await CLR.getBufferTokenBalance();
-    let amounts = await getMintedAmounts(CLR, buffer.amount0, buffer.amount1);
-    await CLR.adminStake(amounts[0], amounts[1]);
-}
-
 
 /**
  * Get amounts minted with both tokens
- * @param {Contract} CLR Contract instance
+ * @param {Contract} LPManager Contract instance
  * @param {BigNumber} amount0 token 0 amount
  * @param {BigNumber} amount1 token 1 amount
  * @returns 
  */
-async function getMintedAmounts(CLR, amount0, amount1) {
-    let amountsMinted = await CLR.calculatePoolMintedAmounts(amount0, amount1);
+async function getMintedAmounts(LPManager: UniswapPositionManager, amount0, amount1, poolPrice, priceLower, priceUpper) {
+    let amountsMinted = await LPManager.calculatePoolMintedAmounts(amount0, amount1, poolPrice, priceLower, priceUpper);
     return [amountsMinted.amount0Minted.toString(), amountsMinted.amount1Minted.toString()];
 }
 
@@ -693,6 +879,15 @@ async function getEvent(tx, eventName) {
 }
 
 /**
+ * Get new position token id from a reposition tx
+ */
+async function getNewPositionId(tx) {
+    let event = await getEvent(tx, 'Repositioned');
+    let positionId = event.args.newPositionId;
+    return positionId;
+}
+
+/**
  * Get ETH Balance of contract
  * @param {ethers.Contract} contract 
  */
@@ -706,7 +901,7 @@ async function getBalance(contract) {
  */
 async function getBlockTimestamp() {
     const latestBlock = await network.provider.send("eth_getBlockByNumber", ["latest", false]);
-    return web3.utils.hexToNumber(latestBlock.timestamp);
+    return hre.web3.utils.hexToNumber(latestBlock.timestamp);
 }
 
 /**
@@ -750,6 +945,51 @@ async function getLastBlock() {
 async function getLastBlockTimestamp() {
     let block = await getLastBlock();
     return block.timestamp;
+}
+
+/**
+ * Change current fork for hardhat network
+ * @param network 
+ * @returns 
+ */
+ async function resetFork(network) {
+    let url;
+    const env = process.env;
+    const key = env.ALCHEMY_KEY;
+    const alchemy = {
+        mainnet: 'https://eth-mainnet.alchemyapi.io/v2/',
+        arbitrum: 'https://arb-mainnet.g.alchemy.com/v2/',
+        optimism: 'https://opt-mainnet.g.alchemy.com/v2/',
+        polygon: 'https://polygon-mainnet.g.alchemy.com/v2/',
+        kovan: 'https://eth-kovan.alchemyapi.io/v2/'
+    }
+    switch(network) {
+        case 'mainnet':
+            url = alchemy['mainnet'] + key;
+            break;
+        case 'arbitrum':
+            url = alchemy['arbitrum'] + key;
+            break;
+        case 'optimism':
+            url = alchemy['optimism'] + key;
+            break;
+        case 'polygon':
+            url = alchemy['polygon'] + key;
+            break;
+        default:
+            console.log('invalid network');
+            return;
+    }
+    await network.provider.request({
+        method: "hardhat_reset",
+        params: [
+          {
+            forking: {
+              jsonRpcUrl: url
+            }
+          }
+        ]
+      });
 }
 
 async function verifyContractNoArgs(address) {
@@ -825,15 +1065,6 @@ function getPoolPriceInNumberFormat(poolPrice) {
 }
 
 /**
- * Get pool price in x64.96 format for use with Uni V3
- * @param {Number} price 
- * @returns 
- */
-function getPriceInX96(price) {
-    return sqrt(bn(price.toFixed(0)).shl(96 * 2));
-}
-
-/**
  * Get sqrt of a BigNumber
  * @param {BigNumber} value 
  * @returns 
@@ -841,7 +1072,7 @@ function getPriceInX96(price) {
 function sqrt(value) {
     const ONE = bn(1);
     const TWO = bn(2);
-    x = bn(value);
+    let x = bn(value);
     let z = x.add(ONE).div(TWO);
     let y = x;
     while (z.sub(y).isNegative()) {
@@ -907,17 +1138,19 @@ export {
     getRatio, getTokenPrices, getMinPrice, getMaxPrice, getMinTick, getMaxTick,
     getTokenBalance, getPositionBalance, getBufferBalance, printPositionAndBufferBalance,
     bn, bnDecimal, bnDecimals, getNumberNoDecimals, getNumberDivDecimals, 
-    getBlockTimestamp, swapToken0ForToken1, swapToken1ForToken0, getPriceInX96,
+    getBlockTimestamp, swapToken0ForToken1, swapToken1ForToken0,
     swapToken0ForToken1Decimals, swapToken1ForToken0Decimals, getPoolPriceInNumberFormat,
     increaseTime, mineBlocks, getBufferPositionRatio, getMintedAmounts,
     getSingleTokenMintedAmounts, gnnd, gnn8d, getPoolMidPrice,
-    getTWAPDecimals, getSwapAmountWhenMinting, getMidPrice, printMidPrice,
+    getTWAPDecimals, getRepositionSwapAmount, getMidPrice, printMidPrice,
     getPositionTokenRatio, printPositionTokenRatios, getPriceBounds,
-    stakeBuffer, getBalance, setAutomine, getLastBlock, 
-    getLastBlockTimestamp, decreaseTime, getEvent,
+    getBalance, setAutomine, getLastBlock, 
+    getLastBlockTimestamp, decreaseTime, getEvent, getNewPositionId,
+    getTicksFromPrices, getPriceFromTicks, getPriceInX96,
     // mainnet fork functions
     impersonate, swapToken0ForToken1Mainnet, swapToken1ForToken0Mainnet,
-    receiveXTK, receiveWeth, swapAndStake,
-    depositLiquidityInPool, oneInchSwap, oneInchSwapCLR,
-    verifyContractNoArgs, verifyContractWithArgs, verifyContractWithArgsAndName
+    receiveXTK, receiveWeth, receiveUSDC, receiveUSDT, resetFork,
+    depositLiquidityInPool, oneInchSwap, oneInchSwapCLR, getTokens,
+    verifyContractNoArgs, verifyContractWithArgs, verifyContractWithArgsAndName,
+    getOneInchCalldata
 }
