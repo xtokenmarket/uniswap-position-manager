@@ -71,7 +71,9 @@ contract UniswapPositionManager {
         int24 oldLowerTick,
         int24 oldUpperTick,
         int24 newLowerTick,
-        int24 newUpperTick
+        int24 newUpperTick,
+        uint256 newStakedToken0Balance,
+        uint256 newStakedToken1Balance
     );
 
     /* ========================================================================================= */
@@ -82,7 +84,7 @@ contract UniswapPositionManager {
      * @dev Rebalance a given Uni V3 position to a new price range
      * @param params Reposition parameter structure
      */
-    function reposition(RepositionParams memory params) public {
+    function reposition(RepositionParams calldata params) public {
         PositionParams memory positionParams = getPositionParams(
             params.positionId
         );
@@ -108,8 +110,14 @@ contract UniswapPositionManager {
         );
 
         // approve the tokens to the uni nft manager
-        IERC20(positionParams.token0).approve(address(nftManager), _amount0);
-        IERC20(positionParams.token1).approve(address(nftManager), _amount1);
+        IERC20(positionParams.token0).safeApprove(
+            address(nftManager),
+            _amount0 * 2 // can swap up to 2x the amount
+        );
+        IERC20(positionParams.token1).safeApprove(
+            address(nftManager),
+            _amount1 * 2
+        );
 
         // mint the position NFT and deposit the liquidity
         // user receives the new nft
@@ -131,17 +139,17 @@ contract UniswapPositionManager {
                 IERC20(positionParams.token0).balanceOf(address(this)),
                 IERC20(positionParams.token1).balanceOf(address(this)),
                 newPositionId,
-                getPoolPrice(params.positionId),
+                getPoolPrice(newPositionId),
                 getPriceFromTick(params.newTickLower),
                 getPriceFromTick(params.newTickUpper)
             );
         }
         // Return balance not sent to user
-        IERC20(positionParams.token0).transfer(
+        IERC20(positionParams.token0).safeTransfer(
             msg.sender,
             IERC20(positionParams.token0).balanceOf(address(this))
         );
-        IERC20(positionParams.token1).transfer(
+        IERC20(positionParams.token1).safeTransfer(
             msg.sender,
             IERC20(positionParams.token1).balanceOf(address(this))
         );
@@ -164,7 +172,9 @@ contract UniswapPositionManager {
                 positionParams.tickLower,
                 positionParams.tickUpper,
                 params.newTickLower,
-                params.newTickUpper
+                params.newTickUpper,
+                stakedToken0Balance,
+                stakedToken1Balance
             );
         }
     }
@@ -552,6 +562,16 @@ contract UniswapPositionManager {
     }
 
     /**
+     * @dev Get a pool's liquidity from position id
+     * @param positionId the position id
+     */
+    function getPoolLiquidity(
+        uint256 positionId
+    ) public view returns (uint160 price) {
+        return getPoolLiquidityFromAddress(getPoolAddress(positionId));
+    }
+
+    /**
      * @dev Get a pool's price from pool address
      * @param _pool the pool address
      */
@@ -561,6 +581,34 @@ contract UniswapPositionManager {
         IUniswapV3Pool pool = IUniswapV3Pool(_pool);
         (uint160 sqrtRatioX96, , , , , , ) = pool.slot0();
         return sqrtRatioX96;
+    }
+
+    /**
+     * @dev Returns the current pool liquidity
+     */
+    function getPoolLiquidityFromAddress(address _pool) public view returns (uint128) {
+        IUniswapV3Pool pool = IUniswapV3Pool(_pool);
+        return pool.liquidity();
+    }
+
+    /**
+     * Get pool price in decimal notation with 12 decimals
+     */
+    function getPoolPriceWithDecimals(
+        uint256 positionId,
+        uint8 token0Decimals,
+        uint8 token1Decimals
+    ) public view returns (uint256 price) {
+        uint160 sqrtRatioX96 = getPoolPrice(positionId);
+        uint8 tokenDecimalDiff = token0Decimals >= token1Decimals
+            ? token0Decimals - token1Decimals
+            : token1Decimals - token0Decimals;
+        return
+            token0Decimals >= token1Decimals
+                ? (uint256(sqrtRatioX96).mul(uint256(sqrtRatioX96)).mul(10**(12+tokenDecimalDiff)) >>
+                    192)
+                : (uint256(sqrtRatioX96).mul(uint256(sqrtRatioX96)).mul(10**(12-tokenDecimalDiff)) >>
+                    192);
     }
 
     /* ========================================================================================= */
@@ -595,6 +643,20 @@ contract UniswapPositionManager {
         (, , , , , tickLower, tickUpper, , , , , ) = nftManager.positions(
             positionId
         );
+    }
+
+    /**
+     * @dev Returns a position's lower and upper prices (the price range of the position)
+     * @param positionId the nft id of the position
+     */
+    function getPriceRange(
+        uint256 positionId
+    ) public view returns (uint160 priceLower, uint160 priceUpper) {
+        (, , , , , int24 tickLower, int24 tickUpper, , , , , ) = nftManager.positions(
+            positionId
+        );
+        priceLower = getPriceFromTick(tickLower);
+        priceUpper = getPriceFromTick(tickUpper);
     }
 
     function getPoolAddress(
