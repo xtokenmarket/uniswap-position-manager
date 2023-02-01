@@ -58,6 +58,12 @@ const config: HardhatUserConfig = {
     //   url: alchemy.mainnet + alchemyKey,
     //   timeout: 200000,
     // },
+    polygon: {
+      accounts: [process.env.ADMIN_PRIVATE_KEY],
+      // gasPrice: 5 * 10 ** 9, // 5 gwei
+      url: alchemy.polygon + alchemyKey,
+      timeout: 200000,
+    },
     // goerli: {
     //   accounts: [adminPrivateKey],
     //   url: alchemy.goerli + alchemyKey,

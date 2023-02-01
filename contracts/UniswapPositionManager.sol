@@ -112,11 +112,11 @@ contract UniswapPositionManager {
         // approve the tokens to the uni nft manager
         IERC20(positionParams.token0).safeApprove(
             address(nftManager),
-            _amount0 * 2 // can swap up to 2x the amount
+            type(uint256).max
         );
         IERC20(positionParams.token1).safeApprove(
             address(nftManager),
-            _amount1 * 2
+            type(uint256).max
         );
 
         // mint the position NFT and deposit the liquidity
