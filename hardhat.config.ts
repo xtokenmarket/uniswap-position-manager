@@ -11,6 +11,7 @@ import { resolve } from "path";
 import { config as dotenvConfig } from "dotenv";
 import { HardhatUserConfig } from "hardhat/config";
 
+
 dotenvConfig({ path: resolve(__dirname, "./.env") });
 
 const alchemy = {

@@ -1,7 +1,7 @@
 import { verifyContractWithArgs } from "./helpers";
 import uniswapAddresses from "./uniswapAddresses.json";
 
-const TO_VERIFY = '0xdce16ad5cfba50203766f270d69115c265d2687d';
+const TO_VERIFY = "0x58A9Ea3d583823A4A609373d45e104456932bA9C";
 verify(TO_VERIFY).catch((err) => console.log);
 
 async function verify(positionManagerAddress) {

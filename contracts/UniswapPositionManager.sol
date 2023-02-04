@@ -85,6 +85,7 @@ contract UniswapPositionManager {
      * @param params Reposition parameter structure
      */
     function reposition(RepositionParams calldata params) public {
+        require(nftManager.ownerOf(params.positionId) == msg.sender, "Caller must own position");
         PositionParams memory positionParams = getPositionParams(
             params.positionId
         );
@@ -110,14 +111,19 @@ contract UniswapPositionManager {
         );
 
         // approve the tokens to the uni nft manager
-        IERC20(positionParams.token0).safeApprove(
-            address(nftManager),
-            type(uint256).max
-        );
-        IERC20(positionParams.token1).safeApprove(
-            address(nftManager),
-            type(uint256).max
-        );
+        if(IERC20(positionParams.token0).allowance(address(this), address(nftManager)) == 0){
+            IERC20(positionParams.token0).safeApprove(
+                address(nftManager),
+                type(uint256).max
+            );
+        }
+
+        if(IERC20(positionParams.token1).allowance(address(this), address(nftManager)) == 0){
+            IERC20(positionParams.token1).safeApprove(
+                address(nftManager),
+                type(uint256).max
+            );
+        }
 
         // mint the position NFT and deposit the liquidity
         // user receives the new nft
