@@ -7,6 +7,7 @@ deploy().catch(err => console.log)
 async function deploy() {
     let nftManagerAddress = uniswapAddresses.nonfungibleTokenPositionManagerAddress
     let uniFactoryAddress = uniswapAddresses.v3CoreFactoryAddress
+    console.log('in here')
     const positionManager = await deployArgs('UniswapPositionManager', nftManagerAddress, uniFactoryAddress);
     console.log('deployed position manager at:', positionManager.address);
     await verifyContractWithArgs(positionManager.address, nftManagerAddress, uniFactoryAddress)
