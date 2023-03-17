@@ -22,13 +22,6 @@ const alchemy = {
   goerli: 'https://eth-goerli.alchemyapi.io/v2/'
 }
 
-// let adminPrivateKey: string;
-// if (!process.env.ADMIN_PRIVATE_KEY) {
-//   throw new Error("Please set your ADMIN_PRIVATE_KEY in a .env file");
-// } else {
-//   adminPrivateKey = process.env.ADMIN_PRIVATE_KEY;
-// }
-
 let alchemyKey: string;
 if (!process.env.ALCHEMY_KEY) {
   throw new Error("Please set your ALCHEMY_KEY in a .env file");
@@ -48,9 +41,9 @@ const config: HardhatUserConfig = {
   networks: {
     hardhat: {
       forking: {
-        url: alchemy.mainnet + alchemyKey,
-        enabled: true,
-        blockNumber: 15974600
+        // url: alchemy.mainnet + alchemyKey,
+        url: alchemy.polygon + alchemyKey,
+        // enabled: true,
       }
     },
     // mainnet: {
@@ -61,9 +54,19 @@ const config: HardhatUserConfig = {
     // },
     polygon: {
       accounts: [process.env.ADMIN_PRIVATE_KEY],
-      // gasPrice: 5 * 10 ** 9, // 5 gwei
       url: alchemy.polygon + alchemyKey,
       timeout: 200000,
+    },
+    arbitrum: {
+      accounts: [process.env.ADMIN_PRIVATE_KEY],
+      url: alchemy.arbitrum + alchemyKey,
+      // timeout: 200000,
+    },
+    optimism: {
+      accounts: [process.env.ADMIN_PRIVATE_KEY],
+      // gasPrice: 5 * 10 ** 9, // 5 gwei
+      url: alchemy.optimism + alchemyKey,
+      // timeout: 200000,
     },
     // goerli: {
     //   accounts: [adminPrivateKey],

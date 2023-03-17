@@ -85,93 +85,63 @@ contract UniswapPositionManager {
    * @param params Reposition parameter structure
    */
   function reposition(RepositionParams calldata params) public {
+    PositionParams memory positionParams = getPositionParams(params.positionId);
     require(
       nftManager.ownerOf(params.positionId) == msg.sender,
       "Caller must own position"
     );
-    PositionParams memory positionParams = getPositionParams(params.positionId);
-    uint160 poolPrice = getPoolPrice(params.positionId);
     require(
       params.newTickLower != positionParams.tickLower ||
         params.newTickUpper != positionParams.tickUpper,
       "Need to change ticks"
     );
 
+    address token0 = positionParams.token0;
+    address token1 = positionParams.token1;
+    address poolAddress = getPoolAddress(params.positionId);
+
     // withdraw entire liquidity from the position
-    (uint256 _amount0, uint256 _amount1) = withdrawAll(params.positionId);
+    withdrawAll(params.positionId);
     // burn current position NFT
     burn(params.positionId);
 
-    // calculate how much can we deposit in the new position
-    (uint256 amount0, uint256 amount1) = calculatePoolMintedAmounts(
-      _amount0,
-      _amount1,
-      poolPrice,
+    // swap using 1inch and stake all tokens in position after swap
+    if (params.oneInchData.length != 0) {
+      approveOneInch(token0, token1);
+      oneInchSwap(params.oneInchData);
+    }
+
+    approveNftManager(token0, token1);
+
+    (uint256 amount0Minted, uint256 amount1Minted) = calculatePoolMintedAmounts(
+      IERC20(token0).balanceOf(address(this)),
+      IERC20(token1).balanceOf(address(this)),
+      getPoolPriceFromAddress(poolAddress),
       getPriceFromTick(params.newTickLower),
       getPriceFromTick(params.newTickUpper)
     );
 
-    // approve the tokens to the uni nft manager
-    if (
-      IERC20(positionParams.token0).allowance(
-        address(this),
-        address(nftManager)
-      ) == 0
-    ) {
-      IERC20(positionParams.token0).safeApprove(
-        address(nftManager),
-        type(uint256).max
-      );
-    }
-
-    if (
-      IERC20(positionParams.token1).allowance(
-        address(this),
-        address(nftManager)
-      ) == 0
-    ) {
-      IERC20(positionParams.token1).safeApprove(
-        address(nftManager),
-        type(uint256).max
-      );
-    }
-
-    // mint the position NFT and deposit the liquidity
-    // user receives the new nft
     uint256 newPositionId = createPosition(
-      amount0,
-      amount1,
-      positionParams.token0,
-      positionParams.token1,
+      amount0Minted,
+      amount1Minted,
+      token0,
+      token1,
       positionParams.fee,
       params.newTickLower,
       params.newTickUpper
     );
 
-    // swap using 1inch and stake all tokens in position after swap
-    if (params.oneInchData.length != 0) {
-      approveOneInch(positionParams.token0, positionParams.token1);
-      oneInchSwap(params.oneInchData);
-      stakePosition(
-        IERC20(positionParams.token0).balanceOf(address(this)),
-        IERC20(positionParams.token1).balanceOf(address(this)),
-        newPositionId,
-        getPoolPrice(newPositionId),
-        getPriceFromTick(params.newTickLower),
-        getPriceFromTick(params.newTickUpper)
-      );
-    }
     // Return balance not sent to user
-    IERC20(positionParams.token0).safeTransfer(
+    IERC20(token0).safeTransfer(
       msg.sender,
-      IERC20(positionParams.token0).balanceOf(address(this))
+      IERC20(token0).balanceOf(address(this))
     );
-    IERC20(positionParams.token1).safeTransfer(
+    IERC20(token1).safeTransfer(
       msg.sender,
-      IERC20(positionParams.token1).balanceOf(address(this))
+      IERC20(token1).balanceOf(address(this))
     );
 
-    // Check if balances are enough
+    // Check if balances meet min threshold
     (
       uint256 stakedToken0Balance,
       uint256 stakedToken1Balance
@@ -179,9 +149,9 @@ contract UniswapPositionManager {
     require(
       params.minAmount0Staked <= stakedToken0Balance &&
         params.minAmount1Staked <= stakedToken1Balance,
-      "Staked token amounts after rebalance are not enough"
+      "Staked amounts after rebalance are insufficient"
     );
-    
+
     emit Repositioned(
       params.positionId,
       newPositionId,
@@ -348,11 +318,32 @@ contract UniswapPositionManager {
   }
 
   /**
+   * Approve NFT Manager for deposits
+   */
+  function approveNftManager(address token0, address token1) private {
+    if (IERC20(token0).allowance(address(this), address(nftManager)) == 0) {
+      IERC20(token0).safeApprove(address(nftManager), type(uint256).max);
+    }
+
+    if (IERC20(token1).allowance(address(this), address(nftManager)) == 0) {
+      IERC20(token1).safeApprove(address(nftManager), type(uint256).max);
+    }
+  }
+
+  /**
    * Approve 1inch v4 for swaps
    */
   function approveOneInch(address token0, address token1) private {
-    IERC20(token0).safeApprove(oneInchExchange, type(uint256).max);
-    IERC20(token1).safeApprove(oneInchExchange, type(uint256).max);
+    if (
+      IERC20(token0).allowance(address(this), address(oneInchExchange)) == 0
+    ) {
+      IERC20(token0).safeApprove(oneInchExchange, type(uint256).max);
+    }
+    if (
+      IERC20(token1).allowance(address(this), address(oneInchExchange)) == 0
+    ) {
+      IERC20(token1).safeApprove(oneInchExchange, type(uint256).max);
+    }
   }
 
   /* ========================================================================================= */

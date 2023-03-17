@@ -23,7 +23,8 @@ async function deploy(contractName) {
  */
 async function deployArgs(contractName, ...args) {
     let Contract = await ethers.getContractFactory(contractName);
-    return await Contract.deploy(...args, {gasLimit: 8888888});
+    // return await Contract.deploy(...args);
+    return await Contract.deploy(...args, {gasLimit: 8888888}); // doesnt work on arbitrum
 }
 
 /**
